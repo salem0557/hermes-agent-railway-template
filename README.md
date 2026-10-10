@@ -9,10 +9,10 @@ Deploy [Hermes Agent](https://github.com/NousResearch/hermes-agent) on Railway u
 The Dockerfile is pinned to this official image:
 
 ```text
-nousresearch/hermes-agent:v2026.8.3@sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e
+nousresearch/hermes-agent:v0.21.6@sha256:55e192fba0cd4fde61142abbff5adeacff40efdb482ccd0ff877924bd274f909
 ```
 
-`v2026.8.3` is Hermes Agent v0.20.0, "The Herald Release." The compatibility entrypoint delegates to this release's upstream entrypoint dispatcher so both normal PID-1 startup and Railway runtimes with an init wrapper are supported.
+The compatibility entrypoint delegates to the release's upstream entrypoint dispatcher so both normal PID-1 startup and Railway runtimes with an init wrapper are supported.
 
 Use these service settings:
 
@@ -44,6 +44,8 @@ The Dockerfile supplies the remaining official variables:
 HERMES_HOME=/data/.hermes
 HERMES_WRITE_SAFE_ROOT=/data/.hermes
 HERMES_LAZY_INSTALL_TARGET=/data/.hermes/lazy-packages
+HERMES_STORAGE_CACHE_DIR=/data/.hermes/storage-cache
+HERMES_STORAGE_CACHE_MAX_MB=1024
 HERMES_DASHBOARD=1
 HERMES_DASHBOARD_HOST=0.0.0.0
 HERMES_GATEWAY_BOOTSTRAP_STATE=running
@@ -52,6 +54,35 @@ HERMES_GATEWAY_BOOTSTRAP_STATE=running
 The entrypoint maps `PORT` to `HERMES_DASHBOARD_PORT` at runtime.
 
 Provider credentials, messaging channels, models, skills, profiles, and gateway state are managed through the official dashboard and persisted under `/data/.hermes`.
+
+## Railway Bucket storage
+
+The image includes a small `hermes-storage` client and a Hermes skill for moving large user artifacts to a Railway Bucket. The Bucket is object storage, so an object is downloaded into a bounded local cache before a tool can open or modify it.
+
+Add these variables to the Hermes service as Railway reference variables, replacing `hermes-storage` only if the Bucket service has a different name:
+
+```dotenv
+HERMES_STORAGE_BUCKET=${{hermes-storage.BUCKET}}
+HERMES_STORAGE_ENDPOINT=${{hermes-storage.ENDPOINT}}
+HERMES_STORAGE_ACCESS_KEY_ID=${{hermes-storage.ACCESS_KEY_ID}}
+HERMES_STORAGE_SECRET_ACCESS_KEY=${{hermes-storage.SECRET_ACCESS_KEY}}
+HERMES_STORAGE_REGION=${{hermes-storage.REGION}}
+```
+
+The values remain Railway references; do not copy the generated credentials into source control. On startup, the entrypoint installs the `railway-storage` skill only when the Bucket and endpoint variables are present.
+
+Useful commands inside the Hermes service are:
+
+```sh
+hermes-storage status
+hermes-storage list
+hermes-storage put /data/.hermes/workspace/report.pdf reports/report.pdf
+hermes-storage cache reports/report.pdf
+```
+
+The helper accepts local paths only under `HERMES_WRITE_SAFE_ROOT`. It refuses common credential, private-key, database, authentication, and session-state files. Uploads do not remove local sources, downloads are atomic, and no remote-delete command is provided. `cache` keeps recently used objects under `HERMES_STORAGE_CACHE_DIR` and prunes only generated cache files when they exceed `HERMES_STORAGE_CACHE_MAX_MB`.
+
+This facility is intended for user artifacts and archives. Hermes runtime state and package-manager installations still require the mounted volume and must not be moved while the service is running.
 
 ## Upgrading Hermes
 
