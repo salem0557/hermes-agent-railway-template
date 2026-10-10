@@ -22,4 +22,10 @@ export HERMES_DASHBOARD_BASIC_AUTH_USERNAME="$dashboard_username"
 export HERMES_DASHBOARD_BASIC_AUTH_PASSWORD="$dashboard_password"
 export HERMES_DASHBOARD_BASIC_AUTH_SECRET="$dashboard_secret"
 
+if [ -n "${HERMES_STORAGE_BUCKET:-}" ] && [ -n "${HERMES_STORAGE_ENDPOINT:-}" ]; then
+    storage_skill_dir="${HERMES_HOME:-/data/.hermes}/skills/railway-storage"
+    mkdir -p "$storage_skill_dir"
+    cp /usr/local/share/hermes-railway/skills/railway-storage/SKILL.md "$storage_skill_dir/SKILL.md"
+fi
+
 exec /opt/hermes/docker/entrypoint-dispatch.sh "$@"
