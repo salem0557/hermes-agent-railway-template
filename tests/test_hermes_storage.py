@@ -1,7 +1,9 @@
 import importlib.util
+import hashlib
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -47,6 +49,11 @@ class HermesStorageSafetyTests(unittest.TestCase):
         ):
             with self.subTest(path=path), self.assertRaises(storage.StorageError):
                 storage.require_uploadable(path)
+
+    def test_sensitive_live_object_keys_are_rejected(self):
+        for key in ("sessions/run.json", "private.key", "state.db", "tokens/access.json"):
+            with self.subTest(key=key), self.assertRaises(storage.StorageError):
+                storage.require_safe_logical_key(key)
 
     def test_prune_only_removes_oldest_cache_files(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -114,6 +121,118 @@ class HermesStorageSafetyTests(unittest.TestCase):
                     storage.download("artifact.bin", destination, force=False)
             self.assertFalse(destination.exists())
             self.assertEqual(list(Path(temporary).iterdir()), [])
+
+
+class MissingObject(Exception):
+    response = {"Error": {"Code": "404"}}
+
+
+class MemoryS3Client:
+    def __init__(self):
+        self.objects = {}
+
+    def _put(self, key, body, metadata=None):
+        etag = hashlib.md5(body, usedforsecurity=False).hexdigest()
+        self.objects[key] = {"body": body, "metadata": metadata or {}, "etag": etag}
+
+    def head_object(self, Bucket, Key):
+        del Bucket
+        if Key not in self.objects:
+            raise MissingObject()
+        item = self.objects[Key]
+        return {"ContentLength": len(item["body"]), "Metadata": item["metadata"], "ETag": f'"{item["etag"]}"'}
+
+    def upload_file(self, filename, bucket, key, ExtraArgs=None):
+        del bucket
+        metadata = (ExtraArgs or {}).get("Metadata", {})
+        self._put(key, Path(filename).read_bytes(), metadata)
+
+    def download_file(self, bucket, key, filename):
+        del bucket
+        Path(filename).write_bytes(self.objects[key]["body"])
+
+    def copy_object(self, Bucket, CopySource, Key, MetadataDirective):
+        del Bucket, MetadataDirective
+        source = self.objects[CopySource["Key"]]
+        self._put(Key, source["body"], dict(source["metadata"]))
+
+
+class HermesStorageWorkspaceTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name) / "safe"
+        self.root.mkdir()
+        self.client = MemoryS3Client()
+        self.environment = mock.patch.dict(os.environ, {
+            "HERMES_WRITE_SAFE_ROOT": str(self.root),
+            "HERMES_STORAGE_CACHE_DIR": str(self.root / "storage-cache"),
+        })
+        self.environment.start()
+        self.client_patch = mock.patch.object(storage, "make_client", return_value=self.client)
+        self.bucket_patch = mock.patch.object(storage, "bucket_name", return_value="bucket")
+        self.client_patch.start()
+        self.bucket_patch.start()
+
+    def tearDown(self):
+        self.bucket_patch.stop()
+        self.client_patch.stop()
+        self.environment.stop()
+        self.temporary.cleanup()
+
+    def test_live_file_round_trip_versions_previous_and_releases_verified_copy(self):
+        source = self.root / "report.txt"
+        source.write_text("version one", encoding="utf-8")
+        storage.command_sync(SimpleNamespace(key="reports/report.txt", from_file=str(source), force=True))
+
+        opened = storage.workspace_path("reports/report.txt")
+        storage.command_open(SimpleNamespace(key="reports/report.txt", max_mb=10))
+        self.assertEqual(opened.read_text(encoding="utf-8"), "version one")
+
+        opened.write_text("version two", encoding="utf-8")
+        storage.command_sync(SimpleNamespace(key="reports/report.txt", from_file=None, force=False))
+        versions = [key for key in self.client.objects if key.startswith("workspace/versions/reports/report.txt/")]
+        self.assertEqual(len(versions), 1)
+        self.assertEqual(self.client.objects[versions[0]]["body"], b"version one")
+
+        storage.command_release(SimpleNamespace(key="reports/report.txt"))
+        self.assertFalse(opened.exists())
+        self.assertEqual(self.client.objects["workspace/current/reports/report.txt"]["body"], b"version two")
+
+    def test_sync_rejects_remote_change_after_open(self):
+        source = self.root / "report.txt"
+        source.write_text("base", encoding="utf-8")
+        storage.command_sync(SimpleNamespace(key="reports/report.txt", from_file=str(source), force=True))
+        storage.command_open(SimpleNamespace(key="reports/report.txt", max_mb=10))
+        opened = storage.workspace_path("reports/report.txt")
+        opened.write_text("local edit", encoding="utf-8")
+        self.client._put("workspace/current/reports/report.txt", b"remote edit", {"sha256": hashlib.sha256(b"remote edit").hexdigest()})
+
+        with self.assertRaises(storage.StorageError):
+            storage.command_sync(SimpleNamespace(key="reports/report.txt", from_file=None, force=False))
+
+    def test_release_rejects_unsynced_local_change(self):
+        source = self.root / "report.txt"
+        source.write_text("base", encoding="utf-8")
+        storage.command_sync(SimpleNamespace(key="reports/report.txt", from_file=str(source), force=True))
+        storage.command_open(SimpleNamespace(key="reports/report.txt", max_mb=10))
+        opened = storage.workspace_path("reports/report.txt")
+        opened.write_text("unsynced", encoding="utf-8")
+
+        with self.assertRaises(storage.StorageError):
+            storage.command_release(SimpleNamespace(key="reports/report.txt"))
+        self.assertTrue(opened.exists())
+
+    def test_open_does_not_replace_unmanaged_local_file(self):
+        source = self.root / "report.txt"
+        source.write_text("remote", encoding="utf-8")
+        storage.command_sync(SimpleNamespace(key="reports/report.txt", from_file=str(source), force=True))
+        unmanaged = storage.workspace_path("reports/report.txt")
+        unmanaged.parent.mkdir(parents=True)
+        unmanaged.write_text("local only", encoding="utf-8")
+
+        with self.assertRaises(storage.StorageError):
+            storage.command_open(SimpleNamespace(key="reports/report.txt", max_mb=10))
+        self.assertEqual(unmanaged.read_text(encoding="utf-8"), "local only")
 
 
 if __name__ == "__main__":

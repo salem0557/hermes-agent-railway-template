@@ -46,6 +46,7 @@ HERMES_WRITE_SAFE_ROOT=/data/.hermes
 HERMES_LAZY_INSTALL_TARGET=/data/.hermes/lazy-packages
 HERMES_STORAGE_CACHE_DIR=/data/.hermes/storage-cache
 HERMES_STORAGE_CACHE_MAX_MB=1024
+HERMES_STORAGE_WORKSPACE_MAX_MB=512
 HERMES_DASHBOARD=1
 HERMES_DASHBOARD_HOST=0.0.0.0
 HERMES_GATEWAY_BOOTSTRAP_STATE=running
@@ -78,11 +79,19 @@ hermes-storage status
 hermes-storage list
 hermes-storage put /data/.hermes/workspace/report.pdf reports/report.pdf
 hermes-storage cache reports/report.pdf
+hermes-storage sync reports/report.pdf --from-file /data/.hermes/workspace/report.pdf --force
+hermes-storage open reports/report.pdf
+hermes-storage sync reports/report.pdf
+hermes-storage release reports/report.pdf
 ```
 
 The helper accepts local paths only under `HERMES_WRITE_SAFE_ROOT`. It refuses common credential, private-key, database, authentication, and session-state files. Uploads do not remove local sources, downloads are atomic, and no remote-delete command is provided. `cache` keeps recently used objects under `HERMES_STORAGE_CACHE_DIR` and prunes only generated cache files when they exceed `HERMES_STORAGE_CACHE_MAX_MB`.
 
 This facility is intended for user artifacts and archives. Hermes runtime state and package-manager installations still require the mounted volume and must not be moved while the service is running.
+
+For files that change over time, `sync` publishes the latest verified content under `workspace/current`, while first copying the previous remote object to `workspace/versions`. `open` checks the current remote ETag before returning a bounded local working copy, and it refuses to overwrite unsynced local changes. After a successful sync, `release` removes only a byte-for-byte verified local working copy. This gives Hermes an on-demand working set without treating a dated archive as current data.
+
+Package-manager caches are different: they are reproducible downloads, so dated cache archives remain recovery snapshots rather than a continuously synchronized source. A later snapshot may be created before another cleanup, but ordinary Python and npm cache changes do not need to be uploaded after every package operation.
 
 ## Upgrading Hermes
 
