@@ -160,18 +160,21 @@ def command_cache(args: argparse.Namespace) -> int:
     destination = cache_path(key)
     if destination.is_file():
         os.utime(destination, None)
+        prune_cache(args.max_mb, protected={destination})
         print(json.dumps({"cached": key, "path": str(destination), "hit": True}))
         return 0
     result = download(key, destination, force=False)
-    prune_cache(args.max_mb)
-    print(json.dumps({"cached": key, "path": str(result), "hit": False, "bytes": result.stat().st_size}))
+    size = result.stat().st_size
+    prune_cache(args.max_mb, protected={result})
+    print(json.dumps({"cached": key, "path": str(result), "hit": False, "bytes": size}))
     return 0
 
 
-def prune_cache(max_mb: int) -> tuple[int, int]:
+def prune_cache(max_mb: int, *, protected: set[Path] | None = None) -> tuple[int, int]:
     root = cache_root() / "objects"
     if not root.exists():
         return 0, 0
+    protected = {path.resolve() for path in (protected or set())}
     files = [path for path in root.rglob("*") if path.is_file()]
     total = sum(path.stat().st_size for path in files)
     target = max_mb * 1024 * 1024
@@ -179,6 +182,8 @@ def prune_cache(max_mb: int) -> tuple[int, int]:
     for path in sorted(files, key=lambda item: item.stat().st_mtime):
         if total <= target:
             break
+        if path.resolve() in protected:
+            continue
         size = path.stat().st_size
         path.unlink()
         total -= size

@@ -79,6 +79,27 @@ class HermesStorageSafetyTests(unittest.TestCase):
                 else:
                     os.environ["HERMES_STORAGE_CACHE_DIR"] = old_cache
 
+    def test_prune_preserves_the_object_needed_by_current_work(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "safe"
+            cache = root / "cache" / "objects"
+            cache.mkdir(parents=True)
+            current = cache / "current.bin"
+            old_file = cache / "old.bin"
+            current.write_bytes(b"a" * 1_200_000)
+            old_file.write_bytes(b"b" * 100_000)
+            os.utime(old_file, (1, 1))
+            os.utime(current, (2, 2))
+            with mock.patch.dict(os.environ, {
+                "HERMES_WRITE_SAFE_ROOT": str(root),
+                "HERMES_STORAGE_CACHE_DIR": str(root / "cache"),
+            }):
+                removed, remaining = storage.prune_cache(1, protected={current})
+            self.assertEqual(removed, 1)
+            self.assertTrue(current.exists())
+            self.assertFalse(old_file.exists())
+            self.assertEqual(remaining, 1_200_000)
+
     def test_download_replaces_destination_only_after_success(self):
         class FailingClient:
             def download_file(self, _bucket, _key, filename):
